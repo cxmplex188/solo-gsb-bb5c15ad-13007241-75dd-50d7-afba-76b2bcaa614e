@@ -128,44 +128,27 @@ async function api(url, options = {}) {
   return body;
 }
 
-async function refresh() {
-  const data = await api('/api/state');
-  const versionChanged = data.version !== state.version;
-  state.version = data.version;
-  state.maxMembers = data.maxMembers;
-  state.members = data.members;
-  state.edges = data.edges;
-  state.undo = data.undo || null;
-  reconcileSelection();
-  if (versionChanged && preview && !previewStale) invalidatePreview('家谱已变化，请重新预检');
-  if (versionChanged && mergePreview && !mergeStale) invalidateMergePreview('家谱已刷新，请重新预览合并');
-  if (versionChanged && impactPreview && !impactStale) {
-    invalidateImpactPreview('家谱已发生写入，以下预览基于旧版本，请重新预览');
-  }
-  invalidateMemberImpactOnRefresh(versionChanged);
-  if (versionChanged && restorePreview && !restoreStale) {
-    invalidateRestorePreview('家谱已发生写入，以下恢复预览基于旧版本，请重新预览');
-  }
-  if (versionChanged && branchResult && !branchStale) {
-    invalidateBranchResult('家谱已发生写入，以下支系视图基于旧版本，请重新生成');
-  }
-  if (versionChanged && chartResult && !chartStale) {
-    invalidateChartResult('家谱已发生写入，以下关系图基于旧版本，请重新生成');
-  }
-  if (versionChanged && criticalResult && !criticalStale) {
-    invalidateCriticalResult('家谱已发生写入，以下关键连接结果基于旧版本，请重新计算');
-  }
-  render();
-  loadUpcoming();
-}
+// 慢网络保护：完整家谱响应（/api/state 读取与一切写入的返回）必须按服务端 version
+// 单调发布。旧读取可能先发出、在写入成功之后才返回；若无条件应用，旧响应会把成员、
+// 关系与最近撤销信息整体回退。这里以「版本不小于已发布版本」为准入条件，任何过期
+// 响应（含过期写入响应）都直接丢弃，不更新状态、不渲染、不使预览失效。
+// 同版本的完整快照内容一致（写入不可变、只有新写入才推进版本），仅首次加载允许应用，
+// 之后同版本响应同样视为过期，避免重复渲染与重复拉取纪念日清单。
+let statePublished = false;
 
-function applyStateAndRender(data) {
+/**
+ * 按版本单调发布一份完整家谱快照。
+ * @returns {boolean} 是否已实际发布；false 表示响应版本过期、被丢弃。
+ */
+function publishState(data) {
+  if (statePublished && data.version < state.version) return false;
   const versionChanged = data.version !== state.version;
   state.version = data.version;
   state.maxMembers = data.maxMembers;
   state.members = data.members;
   state.edges = data.edges;
   state.undo = data.undo || null;
+  statePublished = true;
   reconcileSelection();
   if (versionChanged && preview && !previewStale) invalidatePreview('家谱已变化，请重新预检');
   if (versionChanged && mergePreview && !mergeStale) invalidateMergePreview('家谱已变化，请重新预览合并');
@@ -187,6 +170,13 @@ function applyStateAndRender(data) {
   }
   render();
   loadUpcoming();
+  return true;
+}
+
+/** 拉取完整家谱：慢网络下迟到的旧读取若落后于已发布版本，会被 publishState 丢弃 */
+async function refresh() {
+  const data = await api('/api/state');
+  return publishState(data);
 }
 
 /**
@@ -284,7 +274,7 @@ async function undoLastChange() {
       method: 'POST',
       body: JSON.stringify({ version: state.version }),
     });
-    applyStateAndRender(data);
+    publishState(data);
     markStale(); // 恢复后让已有共同祖先查询结果失效
     toast(`已撤销：${data.undone || label}`);
   } catch (err) {
@@ -363,7 +353,7 @@ function startRename(li, member) {
         method: 'PATCH',
         body: JSON.stringify({ name }),
       });
-      applyStateAndRender(data);
+      publishState(data);
       markStale();
       toast('已重命名');
     } catch (err) {
@@ -518,7 +508,7 @@ $('member-form').addEventListener('submit', async (e) => {
       method: 'POST',
       body: JSON.stringify({ name }),
     });
-    applyStateAndRender(data);
+    publishState(data);
     input.value = '';
     input.focus();
     toast('成员已添加');
@@ -531,7 +521,7 @@ async function removeMember(member) {
   if (!confirm(`确定删除成员「${member.name}」？\n与之相关的全部父母/子女关系将一并删除。`)) return;
   try {
     const data = await api(`/api/members/${encodeURIComponent(member.id)}`, { method: 'DELETE' });
-    applyStateAndRender(data);
+    publishState(data);
     markStale();
     toast('成员已删除');
   } catch (err) {
@@ -584,7 +574,7 @@ $('edge-form').addEventListener('submit', async (e) => {
       method: 'POST',
       body: JSON.stringify({ parentId, childId }),
     });
-    applyStateAndRender(data);
+    publishState(data);
     markStale();
     toast('关系已建立');
   } catch (err) {
@@ -599,7 +589,7 @@ async function removeEdge(edge) {
       method: 'DELETE',
       body: JSON.stringify({ parentId: edge.parentId, childId: edge.childId }),
     });
-    applyStateAndRender(data);
+    publishState(data);
     markStale();
     toast('关系已删除');
   } catch (err) {
@@ -705,7 +695,7 @@ async function submitBatch() {
     preview = null;
     previewStale = false;
     staleReason = '';
-    applyStateAndRender(data);
+    publishState(data);
     markStale();
     toast('整批关系已一次写入');
   } catch (err) {
@@ -876,7 +866,7 @@ async function submitMerge() {
     mergeStaleReason = '';
     selection.mergeKeep = '';
     selection.mergeRemove = '';
-    applyStateAndRender(data);
+    publishState(data);
     markStale();
     toast(`已将「${mergeName}」并入「${keepName}」，保留成员「${keepName}」`);
   } catch (err) {
@@ -2151,7 +2141,7 @@ async function submitRestore() {
     restoreStale = false;
     restoreStaleReason = '';
     $('restore-file').value = '';
-    applyStateAndRender(data);
+    publishState(data);
     markStale();
     toast('备份已恢复：家谱已整体替换，如需回退可在「最近操作」中撤销');
   } catch (err) {
@@ -2275,12 +2265,20 @@ function localToday() {
   return `${now.getFullYear()}-${mm}-${dd}`;
 }
 
-/** 拉取未来 30 天纪念日清单（只读；任何纪念日/成员变更后随状态刷新重新拉取） */
+/**
+ * 拉取未来 30 天纪念日清单（只读；任何纪念日/成员变更后随状态发布重新拉取）。
+ * 同样按请求顺序单调发布：慢网络下先发出的旧请求最后返回时不能覆盖新一轮清单。
+ */
+let upcomingSeq = 0;
 async function loadUpcoming() {
+  const seq = ++upcomingSeq;
   try {
-    upcoming = await api(`/api/anniversaries/upcoming?from=${localToday()}`);
+    const data = await api(`/api/anniversaries/upcoming?from=${localToday()}`);
+    if (seq !== upcomingSeq) return;
+    upcoming = data;
     renderUpcoming();
   } catch (err) {
+    if (seq !== upcomingSeq) return;
     toast(`纪念日清单加载失败：${err.message}`, true);
   }
 }
@@ -2416,7 +2414,7 @@ function startAnnivEdit(li, member) {
         method: 'PUT',
         body: JSON.stringify({ birthday: b.value, deathday: d.value }),
       });
-      applyStateAndRender(data);
+      publishState(data);
       toast('纪念日已保存');
     } catch (err) {
       // 非法日期被服务端拒绝：数据不变，保持编辑状态便于修正
@@ -2444,7 +2442,7 @@ async function clearAnniversaries(member) {
       method: 'PUT',
       body: JSON.stringify({ birthday: null, deathday: null }),
     });
-    applyStateAndRender(data);
+    publishState(data);
     toast('纪念日已清除');
   } catch (err) {
     toast(err.message, true);
