@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>家谱关系核对</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <h1>家谱关系核对</h1>
+    <p class="subtitle">
+      录入成员与「父母 → 子女」关系（每名子女至多两位父母），自动拒绝自指、重复边与祖先环路；
+      每次成功写入都可在顶部「最近操作」中一键撤销（重启后仍可撤销，仅可撤销一次）；
+      选中两人即可沿父母链查询总代数最少的全部共同祖先及最短亲缘路径；
+      还可一键核查全部「辈分矛盾」：同一对祖先与后代沿不同路径的最少 / 最多代数不一致时逐条列出；
+      成员列表每行的「删除影响」可在删除前预览：服务端以当前家谱构造只读假设图移除该成员及其亲子关系，
+      逐对列出原本可达而删除后不可达、以及仍可达但最短代数增加的祖先→后代成员对（各附变更前后一条最短成员链）；
+      「变更影响预览」可在不落盘的假设图上试算新增 / 移除一条关系前后辈分矛盾的逐对变化；
+      「备份与恢复」可下载仅含成员 ID、姓名、纪念日与关系的 JSON 备份，选择备份文件预览校验后整体恢复（可撤销）；
+      「成员纪念日」可为每名成员登记一个生日与一个忌日（公历月日），并查看包含今天在内的未来 30 天纪念日清单；
+      「后代支系视图」可选择始祖与 1～10 代上限提取后代：同一后代只显示一次、按最短代数分组并标记所属分支，
+      仅展示支系内亲子关系，结果可下载为局部导出的 JSON；
+      「整谱关系图」把全部成员与父母→子女关系绘成可缩放的分层 SVG（按连通分量分组、最长父母链分层，
+      图上标注生成时的家谱版本），可下载，整个模块只读；
+      「关键连接」把全部关系视为无向连接，按家族分别找出「移除单条就会拆开其家族」的桥梁关系，
+      逐条展示断开后原家族两侧的成员数与姓名（只读，标注所依据的家谱版本）。
+    </p>
+  </header>
+
+  <main class="layout">
+    <!-- 最近操作与撤销 -->
+    <section class="card wide undo-card" aria-labelledby="undo-title">
+      <h2 id="undo-title">最近操作</h2>
+      <div id="undo-box" class="undo-box">
+        <p id="undo-info" class="undo-info"></p>
+        <button type="button" id="undo-button" class="primary">撤销这次操作</button>
+      </div>
+      <p class="empty-hint">
+        每次成功写入都会保存变更前的完整家谱作为唯一可撤销快照（重启后仍可撤销）；
+        撤销会恢复成员 ID、姓名、纪念日与全部关系原貌、推进版本并清空快照，只能撤销一次。
+      </p>
+    </section>
+
+    <!-- 成员管理 -->
+    <section class="card" aria-labelledby="members-title">
+      <h2 id="members-title">① 成员 <span id="member-count" class="badge">0/30</span></h2>
+      <form id="member-form" class="inline-form">
+        <input type="text" id="member-name" maxlength="50" placeholder="输入姓名，如：张三" autocomplete="off" />
+        <button type="submit">添加</button>
+      </form>
+      <ul id="member-list" class="member-list" aria-live="polite"></ul>
+
+      <!-- 合并重复成员 -->
+      <div id="merge-panel" class="batch-panel">
+        <div class="batch-head">
+          <h3>合并重复成员</h3>
+          <div class="batch-actions">
+            <button type="button" id="merge-preview" class="primary">预览合并</button>
+            <button type="button" id="merge-submit" disabled>确认合并</button>
+          </div>
+        </div>
+        <form id="merge-form" class="merge-form">
+          <label>
+            保留成员（合并后保留其姓名）
+            <select id="merge-keep"></select>
+          </label>
+          <label>
+            被合并成员（合并后删除）
+            <select id="merge-remove"></select>
+          </label>
+        </form>
+        <p id="merge-status" class="batch-status" hidden></p>
+        <div id="merge-result" class="merge-result" hidden></div>
+        <p class="empty-hint" id="merge-empty">
+          成员不足两人时无法合并。选择「保留成员」与「被合并成员」后点击「预览合并」：
+          被合并成员在全部关系中的 ID 将被替换为保留成员并自动去重；
+          若产生自指、某子女超过两位父母或祖先环路，会逐项列出冲突并禁止提交。预览不会修改家谱。
+        </p>
+      </div>
+    </section>
+
+    <!-- 删除成员影响预览 -->
+    <section class="card wide" aria-labelledby="member-impact-title">
+      <h2 id="member-impact-title">删除影响预览</h2>
+      <p class="empty-hint">
+        点击「① 成员」列表中某位成员行内的「删除影响」，服务端以当前家谱构造<strong>不落盘的只读假设图</strong>：
+        移除该成员本身及与其相连的全部父母→子女关系，仅比较删除后<strong>仍在谱中</strong>的有序祖先→后代成员对。
+        列出两类影响：<strong>删除后不可达</strong>（原本的唯一通路经过该成员，删除后成员链为空）与
+        <strong>最短代数增加</strong>（仍有替代路径但必须绕远，附增加代数与变更前后各一条最短成员链）；
+        多路径按最短代数判定，<strong>仍有同代替代路径的成员对不会误报为断联</strong>。
+        预览只读、不写家谱；结果标明所依据的家谱版本，家谱发生写入后会标记过期并提示重新预览。
+        现有的「删除」与顶部「撤销」入口不受影响、继续可用。
+      </p>
+      <div id="member-impact-result" class="result" aria-live="polite">
+        <p class="placeholder">在「① 成员」中点击某位成员的「删除影响」查看预览。</p>
+      </div>
+    </section>
+
+    <!-- 关系管理 -->
+    <section class="card wide" aria-labelledby="edges-title">
+      <h2 id="edges-title">② 父母 → 子女关系</h2>
+      <form id="edge-form" class="edge-form">
+        <label>
+          父母
+          <select id="edge-parent"></select>
+        </label>
+        <span class="arrow" aria-hidden="true">→</span>
+        <label>
+          子女
+          <select id="edge-child"></select>
+        </label>
+        <button type="submit">建立关系</button>
+        <button type="button" id="draft-add">加入批量草稿</button>
+      </form>
+
+      <!-- 批量录入草稿 -->
+      <div id="batch-panel" class="batch-panel">
+        <div class="batch-head">
+          <h3>批量录入草稿 <span id="draft-count" class="badge">0</span></h3>
+          <div class="batch-actions">
+            <button type="button" id="batch-preview" class="primary">预检整批</button>
+            <button type="button" id="batch-submit" disabled>全部合法，提交整批</button>
+            <button type="button" id="batch-clear" class="danger-link">清空草稿</button>
+          </div>
+        </div>
+        <p id="batch-status" class="batch-status" hidden></p>
+        <ol id="draft-list" class="draft-list" aria-live="polite"></ol>
+        <p class="empty-hint" id="draft-empty">
+          草稿为空。在上方选择父母与子女后点击「加入批量草稿」可累计多条；
+          点击「预检整批」查看每条错误及整批可否提交，提交前家谱被他人改动会被拒绝并要求重新预检。
+        </p>
+      </div>
+
+      <h3 class="list-title">已有关系</h3>
+      <ul id="edge-list" class="edge-list" aria-live="polite"></ul>
+    </section>
+
+    <!-- 共同祖先查询 -->
+    <section class="card wide" aria-labelledby="query-title">
+      <h2 id="query-title">③ 共同祖先核对</h2>
+      <form id="query-form" class="edge-form">
+        <label>
+          成员甲
+          <select id="query-a"></select>
+        </label>
+        <span class="arrow" aria-hidden="true">⇄</span>
+        <label>
+          成员乙
+          <select id="query-b"></select>
+        </label>
+        <button type="submit" class="primary">查询共同祖先</button>
+      </form>
+      <div id="query-result" class="result" aria-live="polite">
+        <p class="placeholder">请在上方选择两位成员后点击查询。</p>
+      </div>
+    </section>
+
+    <!-- 辈分矛盾核查 -->
+    <section class="card wide" aria-labelledby="gen-title">
+      <h2 id="gen-title">④ 辈分矛盾核查</h2>
+      <form id="gen-form" class="edge-form">
+        <label>
+          只看与该成员相关的矛盾（祖先或后代，可选）
+          <select id="gen-filter"></select>
+        </label>
+        <button type="submit" class="primary">核查辈分矛盾</button>
+      </form>
+      <p class="empty-hint">
+        对每一对存在祖先关系的成员，沿「父母 → 子女」关系分别求最少与最多代数：
+        两者不等才列为矛盾；同代不同路径（如分别经父系、母系同代到达同一祖先）不报警。
+        查询为只读，成员或关系变更后重新点击核查即可看到最新结果。
+      </p>
+      <div id="gen-result" class="result" aria-live="polite">
+        <p class="placeholder">点击「核查辈分矛盾」开始：将枚举全部祖先—后代对。</p>
+      </div>
+    </section>
+
+    <!-- 变更影响预览 -->
+    <section class="card wide" aria-labelledby="impact-title">
+      <h2 id="impact-title">⑤ 变更影响预览</h2>
+      <form id="impact-form" class="edge-form">
+        <label>
+          变更类型
+          <select id="impact-action">
+            <option value="add">新增一条父母 → 子女关系</option>
+            <option value="remove">移除一条现有关系</option>
+          </select>
+        </label>
+        <label>
+          父母
+          <select id="impact-parent"></select>
+        </label>
+        <span class="arrow" aria-hidden="true">→</span>
+        <label>
+          子女
+          <select id="impact-child"></select>
+        </label>
+        <button type="submit" class="primary">预览影响</button>
+      </form>
+      <p class="empty-hint">
+        在不落盘的假设图上试算一次「新增 / 移除一条父母→子女关系」：新增沿用成员存在、重复、
+        父母上限与祖先环路校验，失败会说明原因；通过时对比变更前后的辈分矛盾，
+        按祖先与后代成员对列出新增、消失与代数范围变化的矛盾，并展示变化前后各自的最短与最长成员链。
+        预览只读、不写家谱；结果标明所依据的家谱版本，家谱发生写入后会提示重新预览。
+      </p>
+      <div id="impact-result" class="result" aria-live="polite">
+        <p class="placeholder">选择变更类型与父母、子女后点击「预览影响」。</p>
+      </div>
+    </section>
+
+    <!-- 成员纪念日 -->
+    <section class="card wide" aria-labelledby="anniv-title">
+      <h2 id="anniv-title">⑦ 成员纪念日</h2>
+      <h3 class="list-title">未来 30 天纪念日 <span id="upcoming-count" class="badge">0</span></h3>
+      <p class="empty-hint">
+        按本机今天（浏览器本地日期）生成包含当天的未来 30 天清单；2 月 29 日登记的纪念日在平年按 2 月 28 日提醒。
+      </p>
+      <ul id="upcoming-list" class="upcoming-list" aria-live="polite"></ul>
+
+      <h3 class="list-title">登记 / 修改纪念日</h3>
+      <p class="empty-hint">
+        每名成员可登记一个生日与一个忌日（公历月日，不含年份）；纪念日随成员数据一同保存，
+        删除成员、撤销与备份恢复时一并处理。
+      </p>
+      <ul id="anniv-list" class="member-list anniv-list" aria-live="polite"></ul>
+      <p class="empty-hint" id="anniv-empty" hidden>尚未添加成员：请先在「① 成员」中录入。</p>
+    </section>
+
+    <!-- 备份与恢复 -->
+    <section class="card wide" aria-labelledby="backup-title">
+      <h2 id="backup-title">⑥ 备份与恢复</h2>
+      <div class="backup-actions">
+        <button type="button" id="backup-download">下载备份（JSON）</button>
+        <p class="empty-hint">
+          备份文件仅含成员 ID、姓名、纪念日与父母→子女关系，可迁移到另一台本地实例恢复。
+        </p>
+      </div>
+      <div id="restore-panel" class="batch-panel">
+        <div class="batch-head">
+          <h3>从备份恢复</h3>
+          <div class="batch-actions">
+            <input type="file" id="restore-file" class="restore-file" accept="application/json,.json" />
+            <button type="button" id="restore-preview" class="primary">预览恢复</button>
+            <button type="button" id="restore-submit" disabled>确认恢复</button>
+          </div>
+        </div>
+        <p id="restore-status" class="batch-status" hidden></p>
+        <div id="restore-result" class="merge-result" hidden></div>
+        <p class="empty-hint">
+          选择本工具下载的 JSON 备份后点击「预览恢复」：服务端按 30 人上限、每名子女至多两位父母、
+          无自指 / 重复关系 / 祖先环路对整份文件逐条校验，重复 ID、缺失端点或非法关系会逐项列出，
+          预览不修改家谱。确认恢复将整体替换当前家谱（版本 +1，可经「最近操作」撤销）；
+          若预览后文件被调换或家谱被修改，确认会被拒绝并要求重新预览。
+        </p>
+      </div>
+    </section>
+
+    <!-- 后代支系视图 -->
+    <section class="card wide" aria-labelledby="branch-title">
+      <h2 id="branch-title">⑧ 后代支系视图</h2>
+      <form id="branch-form" class="edge-form">
+        <label>
+          始祖（支系起点）
+          <select id="branch-root"></select>
+        </label>
+        <label>
+          代数上限（1～10 代）
+          <select id="branch-max-gen"></select>
+        </label>
+        <button type="submit" class="primary">生成支系视图</button>
+        <button type="button" id="branch-export" disabled>下载当前结果（JSON）</button>
+      </form>
+      <p class="empty-hint">
+        沿「父母 → 子女」关系提取所选始祖的后代：同一后代经多条路径到达时只显示一次，
+        按距始祖的最短代数分组，并标记其所属的每个始祖直系子女分支；
+        仅展示两端都在支系内的亲子关系，不带入支系外成员。
+        下载的 JSON 是局部导出（成员 ID、姓名、代数、所属分支与支系内关系），<strong>不是整谱备份</strong>；
+        成员或关系变更后旧结果会标记过期，重新生成即按最新状态计算。
+      </p>
+      <div id="branch-result" class="result" aria-live="polite">
+        <p class="placeholder">选择始祖与代数上限后点击「生成支系视图」。</p>
+      </div>
+    </section>
+
+    <!-- 整谱关系图 -->
+    <section class="card wide" aria-labelledby="chart-title">
+      <h2 id="chart-title">⑨ 整谱关系图</h2>
+      <div class="chart-toolbar">
+        <button type="button" id="chart-generate" class="primary">生成整谱关系图</button>
+        <button type="button" id="chart-download" disabled>下载当前图（SVG）</button>
+        <span class="chart-zoom" role="group" aria-label="缩放控制">
+          <button type="button" id="chart-zoom-out" title="缩小">−</button>
+          <button type="button" id="chart-zoom-reset" title="适应窗口">适应窗口</button>
+          <button type="button" id="chart-zoom-in" title="放大">＋</button>
+        </span>
+      </div>
+      <p class="empty-hint">
+        把当前全部成员与「父母 → 子女」关系绘成一张可缩放的分层图：先按忽略方向的关系划分连通分量
+        （分量之间留白），各分量按最长父母链分层；多位父母指向同一子女时只绘一个成员节点并保留各条连线。
+        图上标注生成时的家谱版本；整个模块只读，家谱写入后请重新生成。可拖动平移、滚轮或按钮缩放。
+      </p>
+      <div id="chart-result" class="result chart-result" aria-live="polite">
+        <p class="placeholder">点击「生成整谱关系图」查看当前家谱的整体结构。</p>
+      </div>
+    </section>
+    <!-- 关键连接 -->
+    <section class="card wide" aria-labelledby="critical-title">
+      <h2 id="critical-title">⑩ 关键连接</h2>
+      <div class="critical-toolbar">
+        <button type="button" id="critical-generate" class="primary">查找关键连接</button>
+      </div>
+      <p class="empty-hint">
+        把当前全部成员与「父母 → 子女」关系视为<strong>无向连接</strong>：先按忽略方向的连通分量
+        （原本互不连通的家族）分组，再在各家族内部分别找出<strong>桥梁关系</strong>——
+        移除这一条关系就会把原来连通的家族拆成互不相连的两部分。逐条展示关系两端、所属家族，
+        以及断开后原家族<strong>两侧的成员数与姓名</strong>；两端之间仍有其他连接路径的关系不会误报。
+        结果标注所依据的家谱版本，家谱写入后请重新计算；整个模块只读。
+      </p>
+      <div id="critical-result" class="result" aria-live="polite">
+        <p class="placeholder">点击「查找关键连接」找出移除后就会拆开其家族的关系。</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="alert" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

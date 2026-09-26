@@ -1,0 +1,17 @@
+{
+  "name": "family-tree-checker",
+  "version": "1.0.0",
+  "description": "本地家谱关系核对网页：成员与父母-子女关系录入、祖先环路检测、共同祖先最短亲缘路径查询",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
