@@ -128,38 +128,20 @@ async function api(url, options = {}) {
   return body;
 }
 
-async function refresh() {
-  const data = await api('/api/state');
-  const versionChanged = data.version !== state.version;
-  state.version = data.version;
-  state.maxMembers = data.maxMembers;
-  state.members = data.members;
-  state.edges = data.edges;
-  state.undo = data.undo || null;
-  reconcileSelection();
-  if (versionChanged && preview && !previewStale) invalidatePreview('家谱已变化，请重新预检');
-  if (versionChanged && mergePreview && !mergeStale) invalidateMergePreview('家谱已刷新，请重新预览合并');
-  if (versionChanged && impactPreview && !impactStale) {
-    invalidateImpactPreview('家谱已发生写入，以下预览基于旧版本，请重新预览');
+/**
+ * 完整家谱响应的单调发布（读取 /api/state 与所有写入响应的统一出口）。
+ * 服务端 version 每次成功写入单调 +1，前端只接受不落后于当前版本的响应：
+ * 慢网络下「旧读取先发出、写入已成功、旧读取最后返回」时，旧响应（version 更小）
+ * 被整体丢弃——不把成员、关系与最近撤销信息回退到旧版本，也不再触发任何失效逻辑
+ * （较新版本发布时已按原规则使批量预检、合并、恢复预览等失效）。
+ * 成员、关系与 undo 始终在同一次同步赋值中一起替换并一次渲染，
+ * 因此成员/关系列表与撤销入口永远显示同一版本的数据。
+ * 返回 true 表示响应被接受并发布，false 表示作为过期/非法响应被丢弃。
+ */
+function publishState(data) {
+  if (!data || !Number.isInteger(data.version) || data.version < state.version) {
+    return false;
   }
-  invalidateMemberImpactOnRefresh(versionChanged);
-  if (versionChanged && restorePreview && !restoreStale) {
-    invalidateRestorePreview('家谱已发生写入，以下恢复预览基于旧版本，请重新预览');
-  }
-  if (versionChanged && branchResult && !branchStale) {
-    invalidateBranchResult('家谱已发生写入，以下支系视图基于旧版本，请重新生成');
-  }
-  if (versionChanged && chartResult && !chartStale) {
-    invalidateChartResult('家谱已发生写入，以下关系图基于旧版本，请重新生成');
-  }
-  if (versionChanged && criticalResult && !criticalStale) {
-    invalidateCriticalResult('家谱已发生写入，以下关键连接结果基于旧版本，请重新计算');
-  }
-  render();
-  loadUpcoming();
-}
-
-function applyStateAndRender(data) {
   const versionChanged = data.version !== state.version;
   state.version = data.version;
   state.maxMembers = data.maxMembers;
@@ -187,6 +169,16 @@ function applyStateAndRender(data) {
   }
   render();
   loadUpcoming();
+  return true;
+}
+
+async function refresh() {
+  const data = await api('/api/state');
+  publishState(data);
+}
+
+function applyStateAndRender(data) {
+  publishState(data);
 }
 
 /**
